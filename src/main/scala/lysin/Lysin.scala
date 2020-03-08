@@ -9,26 +9,26 @@ import java.io.PrintWriter
 import java.io.File
 import sys.process._
 import unindent._
+import scala.util.parsing.input.Reader
+import scala.util.parsing.input.Position
+import scala.util.parsing.input.NoPosition
 
-sealed trait Token
-case object Equals extends Token
-case object BracketOpen extends Token
-case object BracketClose extends Token
-case class DataType(name: String) extends Token
-case class Identifier(value: String) extends Token
-case class Literal(value: Int) extends Token
+sealed trait LysinToken
+case object Equals extends LysinToken
+case object BracketOpen extends LysinToken
+case object BracketClose extends LysinToken
+case class Identifier(value: String) extends LysinToken
+
+sealed trait Literal extends LysinToken
+case class LiteralInteger(value: Int) extends Literal
 
 case class Program(statements: List[Statement])
-
 sealed trait Statement
-
-case class Declaration(name: Identifier) extends Statement
-
+case class Declaration(name: Identifier, dtype: Identifier) extends Statement
 case class Assignment(name: Identifier, literal: Literal) extends Statement
-
 case class Invocation(function: Identifier, param: Identifier) extends Statement
 
-class LysinParser extends RegexParsers {
+object LysinLexer extends RegexParsers {
   override def skipWhitespace = true
   override val whiteSpace = "[ \t\r\f\n]+".r
 
@@ -36,27 +36,54 @@ class LysinParser extends RegexParsers {
   def bracket_open = "(" ^^ (_ => BracketOpen)
   def bracket_close = ")" ^^ (_ => BracketClose)
 
-  def dataType: Parser[DataType] =
-    "int".r ^^ { str => DataType(str) }
-
   def identifier: Parser[Identifier] =
     "[a-zA-Z]+[a-zA-Z0-9]*".r ^^ { str => Identifier(str) }
 
-  def literal: Parser[Literal] =
-    "[0-9]+".r ^^ { str => Literal(str.toInt) }
+  def literalInteger: Parser[LiteralInteger] =
+    "[0-9]+".r ^^ { str => LiteralInteger(str.toInt) }
+
+  def literal: Parser[Literal] = literalInteger
+
+  def tokens: Parser[List[LysinToken]] =
+    phrase(rep1(equals | bracket_open | bracket_close | identifier | literal))
+}
+
+class LysinTokenReader(tokens: Seq[LysinToken]) extends Reader[LysinToken] {
+  override def first: LysinToken = tokens.head
+  override def atEnd: Boolean = tokens.isEmpty
+  override def pos: Position = NoPosition
+  override def rest: Reader[LysinToken] = new LysinTokenReader(tokens.tail)
+}
+
+object LysinParser extends Parsers {
+  override type Elem = LysinToken
+
+  def apply(tokens: Seq[LysinToken]): Program = {
+    val reader = new LysinTokenReader(tokens)
+    program(reader) match {
+      case NoSuccess(msg, next) => Program(List())
+      case Success(result, next) => result
+    }
+  }
+
+  private def identifier: Parser[Identifier] =
+    accept("identifier", { case id @ Identifier(_) => id })
+
+  private def literal: Parser[Literal] =
+    accept("literal", { case id @ LiteralInteger(_) => id })
 
   def declaration: Parser[Declaration] =
-    dataType ~ identifier ^^ {
-      case _ ~ name => Declaration(name)
+    identifier ~ identifier ^^ {
+      case dtype ~ name => Declaration(name, dtype)
     }
 
   def assignment: Parser[Assignment] =
-    identifier ~ equals ~ literal ^^ {
+    identifier ~ Equals ~ literal ^^ {
       case name ~ _ ~ value => Assignment(name, value)
     }
 
   def invocation: Parser[Invocation] =
-    identifier ~ bracket_open ~ identifier ~ bracket_close ^^ {
+    identifier ~ BracketOpen ~ identifier ~ BracketClose ^^ {
       case name ~ _ ~ param ~ _ => Invocation(name, param)
     }
 
@@ -88,9 +115,9 @@ object LysinCompiler {
 
   def statement(stack: List[StackEntry], statement: Statement) = {
     statement match {
-      case decl @ Declaration(_) => declaration(stack, decl)
-      case assi @ Assignment(_, _) => (stack, assignment(stack, assi))
-      case invo @ Invocation(_, _) => (stack, invocation(stack, invo))
+      case id @ Declaration(_, _) => declaration(stack, id)
+      case id @ Assignment(_, _) => (stack, assignment(stack, id))
+      case id @ Invocation(_, _) => (stack, invocation(stack, id))
     }
   }
 
@@ -105,7 +132,7 @@ object LysinCompiler {
   def assignment(stack: List[StackEntry], assignment: Assignment) = {
     val offset = stack
       .find(entry => entry.name == assignment.name.value).get.offset
-    val value: Int = assignment.literal.value
+    val value: Int = assignment.literal.asInstanceOf[LiteralInteger].value
     val asm = s"mov qword [rbp - $offset], $value"
     asm
   }
@@ -126,82 +153,84 @@ object LysinCompiler {
   }
 }
 
-object LysinCli extends LysinParser {
+object LysinCli extends App {
   val file_extension = ".lyn"
 
-  def main(args: Array[String]): Unit = {
-    if (args.length != 1) {
-      println("Expected input file as argument")
-      return
+  if (args.length != 1) {
+    println("Expected input file as argument")
+    System.exit(1)
+  }
+
+  val srcFile = args(0)
+
+  if (!srcFile.endsWith(file_extension)) {
+    println("Expected .lyn file as input")
+    System.exit(1)
+  }
+
+  val source = Source.fromFile(srcFile)
+  val append = (builder: StringBuilder, line: Char) => builder.append(line)
+  val input = source.foldLeft(new StringBuilder)(append)
+
+  val tokens: List[LysinToken] = LysinLexer.parse(LysinLexer.tokens, input) match {
+    case LysinLexer.Success(matched, _) => matched
+    case LysinLexer.Failure(msg, _) => {
+      println("Failure: " + msg)
+      System.exit(1)
+      List()
     }
-
-    val srcFile = args(0)
-
-    if (!srcFile.endsWith(file_extension)) {
-      println("Expected .lyn file as input")
-      return
+    case LysinLexer.Error(msg, _) => {
+      println("Error: " + msg)
+      System.exit(1)
+      List()
     }
+  }
 
-    val source = Source.fromFile(srcFile)
-    val append = (builder: StringBuilder, line: Char) => builder.append(line)
-    val input = source.foldLeft(new StringBuilder)(append)
+  val program: Program = LysinParser(tokens)
 
-    val tree: Program = parse(this.program, input) match {
-      case Success(matched, _) => matched
-      case Failure(msg, _) => {
-        println("Failure: " + msg)
-        Program(List());
-      }
-      case Error(msg, _) => {
-        println("Error: " + msg)
-        Program(List());
-      }
-    }
+  val assembly = LysinCompiler.program(program)
 
-    val program = LysinCompiler.program(tree)
+  val header = i"""
+  section .text
 
-    val header = i"""
-    section .text
+  global _start
 
-    global _start
+  double:
+      push rbp
+      mov rbp, rsp
 
-    double:
-        push rbp
-        mov rbp, rsp
+      mov rax, [rbp + 16]
+      add rax, rax
 
-        mov rax, [rbp + 16]
-        add rax, rax
+      mov rsp, rbp
+      pop rbp
+      ret
 
-        mov rsp, rbp
-        pop rbp
-        ret
+  _start:
 
-    _start:
+  """
 
-    """
+  val indented = assembly.lines().map("    " + _).reduce(_ + "\n" + _).get
 
-    val indented = program.lines().map("    " + _).reduce(_ + "\n" + _).get
+  val asmFile = srcFile.replace(file_extension, ".asm")
+  val writer = new PrintWriter(new File(asmFile))
+  writer.write(header)
+  writer.write(indented)
+  writer.close()
 
-    val asmFile = srcFile.replace(file_extension, ".asm")
-    val writer = new PrintWriter(new File(asmFile))
-    writer.write(header)
-    writer.write(indented)
-    writer.close()
+  val objFile = srcFile.replace(file_extension, ".o")
+  val objStatus = s"nasm -f elf64 -F dwarf -g -o $objFile $asmFile" !
 
-    val objFile = srcFile.replace(file_extension, ".o")
-    val objStatus = s"nasm -f elf64 -F dwarf -g -o $objFile $asmFile" !
+  if (objStatus != 0) {
+    println("Failed to build object file")
+    System.exit(1)
+  }
 
-    if (objStatus != 0) {
-      println("Failed to build object file")
-      return
-    }
+  val binFile = srcFile.replace(file_extension, "")
+  val binStatus = s"ld -o $binFile $objFile" !
 
-    val binFile = srcFile.replace(file_extension, "")
-    val binStatus = s"ld -o $binFile $objFile" !
-
-    if (binStatus != 0) {
-      println("Failed to build binary file")
-      return
-    }
+  if (binStatus != 0) {
+    println("Failed to build binary file")
+    System.exit(1)
   }
 }
