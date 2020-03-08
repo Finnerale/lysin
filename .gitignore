@@ -1,2 +1,7 @@
 *.class
 *.log
+/bin
+/.metals
+/.bloop
+/target
+/project
