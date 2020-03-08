@@ -127,6 +127,8 @@ object LysinCompiler {
 }
 
 object LysinCli extends LysinParser {
+  val file_extension = ".lyn"
+
   def main(args: Array[String]): Unit = {
     if (args.length != 1) {
       println("Expected input file as argument")
@@ -134,6 +136,12 @@ object LysinCli extends LysinParser {
     }
 
     val srcFile = args(0)
+
+    if (!srcFile.endsWith(file_extension)) {
+      println("Expected .lyn file as input")
+      return
+    }
+
     val source = Source.fromFile(srcFile)
     val append = (builder: StringBuilder, line: Char) => builder.append(line)
     val input = source.foldLeft(new StringBuilder)(append)
@@ -174,13 +182,13 @@ object LysinCli extends LysinParser {
 
     val indented = program.lines().map("    " + _).reduce(_ + "\n" + _).get
 
-    val asmFile = srcFile + ".asm"
+    val asmFile = srcFile.replace(file_extension, ".asm")
     val writer = new PrintWriter(new File(asmFile))
     writer.write(header)
     writer.write(indented)
     writer.close()
 
-    val objFile = srcFile + ".o"
+    val objFile = srcFile.replace(file_extension, ".o")
     val objStatus = s"nasm -f elf64 -F dwarf -g -o $objFile $asmFile" !
 
     if (objStatus != 0) {
@@ -188,7 +196,7 @@ object LysinCli extends LysinParser {
       return
     }
 
-    val binFile = srcFile.replace(".ly", "")
+    val binFile = srcFile.replace(file_extension, "")
     val binStatus = s"ld -o $binFile $objFile" !
 
     if (binStatus != 0) {
@@ -197,4 +205,3 @@ object LysinCli extends LysinParser {
     }
   }
 }
-
